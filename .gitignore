@@ -1,0 +1,15 @@
+# Python virtual environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local runtime data and exports
+*.db
+*.sqlite3
+exports/
+
+# Local tooling
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/

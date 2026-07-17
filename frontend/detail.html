@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>指标详情</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+/* ===== 可调参数 ===== */
+:root {
+    --realtime-window-minutes: 15;
+    --max-chart-points: 200;
+    --refresh-ms: 10000;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0f1923; color:#e0e0e0; font-family:'Microsoft YaHei','PingFang SC',sans-serif; }
+.nav { display:flex; align-items:center; background:#152230; padding:0 24px; height:52px; border-bottom:1px solid #1e3040; }
+.nav .logo { font-size:18px; font-weight:bold; color:#4fc3f7; margin-right:40px; }
+.nav a { color:#8899aa; text-decoration:none; padding:0 20px; height:52px; line-height:52px; font-size:14px; transition:all .2s; }
+.nav a:hover, .nav a.active { color:#fff; background:rgba(255,255,255,0.05); border-bottom:2px solid #4fc3f7; }
+.main { padding:20px 24px; }
+/* 页面头部 */
+.header { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+.header h2 { font-size:20px; color:#fff; }
+.header .current { font-size:36px; font-weight:bold; color:#4fc3f7; margin-left:20px; }
+.header .unit { font-size:14px; color:#667788; margin-left:6px; }
+.controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.controls button { background:#1e3040; color:#ccc; border:1px solid #2a4055; padding:6px 14px; border-radius:4px; cursor:pointer; font-size:13px; transition:all .2s; }
+.controls button:hover, .controls button.active { background:#4fc3f7; color:#0f1923; border-color:#4fc3f7; }
+.controls input[type="datetime-local"] { background:#1e3040; color:#ccc; border:1px solid #2a4055; padding:6px 10px; border-radius:4px; font-size:13px; }
+.controls input[type="datetime-local"]::-webkit-calendar-picker-indicator { filter:invert(1); }
+/* 图表区域 */
+.chart-section { background:#152230; border-radius:8px; padding:16px; margin-bottom:16px; }
+.chart-section h3 { font-size:14px; color:#8899aa; margin-bottom:10px; }
+.chart-box { width:100%; height:350px; }
+/* 双图并排 */
+.charts-row { display:flex; gap:16px; }
+.charts-row .chart-section { flex:1; }
+@media (max-width:900px) { .charts-row { flex-direction:column; } }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+    <span class="logo">涂装车间监控系统</span>
+    <a href="index.html">仪表盘</a>
+    <a href="detail.html" class="active">单指标详情</a>
+    <a href="compare.html">多指标对比</a>
+</nav>
+
+<div class="main">
+    <div class="header">
+        <div style="display:flex;align-items:baseline;">
+            <h2 id="metricTitle">--</h2>
+            <span class="current" id="currentVal">--</span>
+            <span class="unit" id="metricUnit"></span>
+        </div>
+        <div class="controls">
+            <button id="btnExport">导出 CSV</button>
+        </div>
+    </div>
+
+    <!-- 实时图 -->
+    <div class="chart-section">
+        <h3 id="realtimeTitle">实时数据（最近 15 分钟）</h3>
+        <div class="chart-box" id="chartRealtime"></div>
+    </div>
+
+    <!-- 历史趋势 + top10图 -->
+    <div class="chart-section" id="historySection">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+            <h3>历史趋势</h3>
+            <div class="controls">
+                <span style="font-size:12px;color:#667788;">起止:</span>
+                <input type="datetime-local" id="dateStart" step="1">
+                <span style="font-size:12px;color:#667788;">~</span>
+                <input type="datetime-local" id="dateEnd" step="1">
+                <span style="font-size:12px;color:#667788;">粒度:</span>
+                <button class="gran-btn active" data-gran="raw">原始</button>
+                <button class="gran-btn" data-gran="hourly">每小时</button>
+                <button class="gran-btn" data-gran="daily">每天</button>
+                <button class="gran-btn" data-gran="3day">每3天</button>
+            </div>
+        </div>
+        <div class="chart-box" id="chartHistory"></div>
+    </div>
+
+    <!-- Top10 柱状图 (仅 quality_top10 显示) -->
+    <div class="chart-section" id="top10Section" style="display:none;">
+        <h3>质量问题 Top10 排行</h3>
+        <div class="chart-box" id="chartTop10"></div>
+    </div>
+</div>
+
+<script>
+// ==================== 配置 ====================
+const BACKEND_URL = 'http://127.0.0.1:9002';
+const REALTIME_WINDOW_MIN = 15;   // 实时图窗口(分钟)
+const MAX_POINTS = 200;
+const REFRESH_MS = 10000;
+
+// ==================== 状态 ====================
+let currentMetric = '';
+let currentGranularity = 'raw';
+let realtimeChart, historyChart, top10Chart;
+let realtimeData = [];
+
+// ==================== 初始化 ====================
+async function init() {
+    const params = new URLSearchParams(window.location.search);
+    currentMetric = params.get('metric');
+
+    if (!currentMetric) {
+        // 默认显示第一个指标，或让用户选择
+        document.getElementById('metricTitle').textContent = '请从仪表盘点击指标卡片进入';
+        return;
+    }
+
+    // 加载指标信息
+    try {
+        const resp = await fetch(`${BACKEND_URL}/api/metrics`);
+        const meta = await resp.json();
+        const info = meta.find(m => m.key === currentMetric);
+        if (info) {
+            document.getElementById('metricTitle').textContent = info.label;
+            document.getElementById('metricUnit').textContent = info.unit || '';
+        }
+    } catch(e) {}
+
+    // 初始化日期选择器
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24*60*60*1000);
+    document.getElementById('dateStart').value = formatDateTimeLocal(yesterday);
+    document.getElementById('dateEnd').value = formatDateTimeLocal(now);
+
+    // 初始化图表
+    initRealtimeChart();
+    if (currentMetric !== 'quality_top10') {
+        initHistoryChart();
+    } else {
+        document.getElementById('historySection').style.display = 'none';
+        document.getElementById('top10Section').style.display = 'block';
+        initTop10Chart();
+    }
+
+    // 事件
+    document.querySelectorAll('.gran-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.gran-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentGranularity = btn.dataset.gran;
+            loadHistoryData();
+        });
+    });
+    document.getElementById('dateStart').addEventListener('change', loadHistoryData);
+    document.getElementById('dateEnd').addEventListener('change', loadHistoryData);
+    document.getElementById('btnExport').addEventListener('click', exportCSV);
+
+    // 首屏加载
+    if (currentMetric === 'quality_top10') {
+        await loadTop10();
+    } else {
+        await loadRealtimeData();
+        await loadHistoryData();
+    }
+
+    // 定时刷新实时数据
+    setInterval(async () => {
+        if (currentMetric === 'quality_top10') {
+            await loadTop10();
+        } else {
+            await loadRealtimeData();
+        }
+    }, REFRESH_MS);
+}
+
+function formatDateTimeLocal(d) {
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ==================== 实时图 ====================
+function initRealtimeChart() {
+    realtimeChart = echarts.init(document.getElementById('chartRealtime'));
+    realtimeChart.setOption({
+        tooltip: { trigger:'axis' },
+        grid: { left:50, right:20, top:20, bottom:30 },
+        xAxis: { type:'time', axisLabel:{color:'#8899aa'}, splitLine:{lineStyle:{color:'#1e3040'}} },
+        yAxis: { type:'value', axisLabel:{color:'#8899aa'}, splitLine:{lineStyle:{color:'#1e3040'}} },
+        series: [{
+            type:'line', smooth:true, showSymbol:false,
+            lineStyle:{color:'#4fc3f7',width:2},
+            areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+                {offset:0,color:'rgba(79,195,247,0.3)'},
+                {offset:1,color:'rgba(79,195,247,0.02)'}
+            ])},
+            data:[]
+        }]
+    });
+    window.addEventListener('resize', () => realtimeChart.resize());
+}
+
+async function loadRealtimeData() {
+    try {
+        const resp = await fetch(`${BACKEND_URL}/api/raw?metric=${currentMetric}&limit=${MAX_POINTS}`);
+        realtimeData = await resp.json();
+
+        // 更新当前值
+        if (realtimeData.length > 0) {
+            const last = realtimeData[realtimeData.length - 1];
+            document.getElementById('currentVal').textContent =
+                parseFloat(last.value).toFixed(currentMetric === 'production_count' ? 1 : 2);
+        }
+
+        // 过滤窗口内数据
+        const cutoff = new Date(Date.now() - REALTIME_WINDOW_MIN * 60 * 1000);
+        const filtered = realtimeData.filter(d => new Date(d.timestamp) >= cutoff);
+
+        realtimeChart.setOption({
+            series: [{
+                data: filtered.map(d => [d.timestamp, d.value])
+            }]
+        });
+        document.getElementById('realtimeTitle').textContent =
+            `实时数据（最近 ${REALTIME_WINDOW_MIN} 分钟）`;
+    } catch(e) { console.error(e); }
+}
+
+// ==================== 历史趋势图 ====================
+function initHistoryChart() {
+    historyChart = echarts.init(document.getElementById('chartHistory'));
+    historyChart.setOption({
+        tooltip: { trigger:'axis' },
+        legend: { data:['平均值','最大值','最小值'], textStyle:{color:'#8899aa'}, top:0 },
+        grid: { left:50, right:20, top:30, bottom:30 },
+        xAxis: { type:'time', axisLabel:{color:'#8899aa'}, splitLine:{lineStyle:{color:'#1e3040'}} },
+        yAxis: { type:'value', axisLabel:{color:'#8899aa'}, splitLine:{lineStyle:{color:'#1e3040'}} },
+        series: [
+            { name:'平均值', type:'line', smooth:true, showSymbol:false, lineStyle:{color:'#4fc3f7',width:2}, data:[] },
+            { name:'最大值', type:'line', smooth:true, showSymbol:false, lineStyle:{color:'#ffa726',width:1.5,type:'dashed'}, data:[] },
+            { name:'最小值', type:'line', smooth:true, showSymbol:false, lineStyle:{color:'#66bb6a',width:1.5,type:'dashed'}, data:[] },
+        ]
+    });
+    window.addEventListener('resize', () => historyChart.resize());
+}
+
+async function loadHistoryData() {
+    const start = document.getElementById('dateStart').value;
+    const end = document.getElementById('dateEnd').value;
+    if (!start || !end) return;
+
+    try {
+        const resp = await fetch(
+            `${BACKEND_URL}/api/stats?metric=${currentMetric}&start=${start}:00&end=${end}:00&granularity=${currentGranularity}`
+        );
+        const data = await resp.json();
+
+        if (currentGranularity === 'raw') {
+            historyChart.setOption({
+                legend: { show: false },
+                series: [
+                    { name:'值', type:'line', smooth:false, showSymbol:false, lineStyle:{color:'#4fc3f7',width:2}, data: data.map(d => [d.timestamp, d.value]) },
+                    { name:'最大值', data:[] },
+                    { name:'最小值', data:[] },
+                ]
+            });
+        } else {
+            historyChart.setOption({
+                legend: { show: true },
+                series: [
+                    { name:'平均值', data: data.map(d => [d.period_start, d.avg]) },
+                    { name:'最大值', data: data.map(d => [d.period_start, d.max]) },
+                    { name:'最小值', data: data.map(d => [d.period_start, d.min]) },
+                ]
+            });
+        }
+    } catch(e) { console.error(e); }
+}
+
+// ==================== Top10 图 ====================
+function initTop10Chart() {
+    top10Chart = echarts.init(document.getElementById('chartTop10'));
+    top10Chart.setOption({
+        tooltip: { trigger:'axis', axisPointer:{type:'shadow'} },
+        grid: { left:80, right:60, top:10, bottom:20 },
+        xAxis: { type:'value', axisLabel:{color:'#8899aa'}, splitLine:{lineStyle:{color:'#1e3040'}} },
+        yAxis: { type:'category', inverse:true, axisLabel:{color:'#8899aa',fontSize:13}, data:[] },
+        series: [{
+            type:'bar', barWidth:20,
+            itemStyle:{color:new echarts.graphic.LinearGradient(0,0,1,0,[
+                {offset:0,color:'#ffa726'},{offset:1,color:'#ef5350'}
+            ])},
+            label:{show:true,position:'right',color:'#ccc'},
+            data:[]
+        }]
+    });
+    window.addEventListener('resize', () => top10Chart.resize());
+}
+
+async function loadTop10() {
+    try {
+        const resp = await fetch(`${BACKEND_URL}/api/top10`);
+        const data = await resp.json();
+        if (Array.isArray(data)) {
+            document.getElementById('currentVal').textContent = '';
+            top10Chart.setOption({
+                yAxis: { data: data.map(d => `${d.rank}. ${d.name}`).reverse() },
+                series: [{ data: data.map(d => d.count).reverse() }]
+            });
+        }
+    } catch(e) { console.error(e); }
+}
+
+// ==================== 导出 ====================
+async function exportCSV() {
+    const start = document.getElementById('dateStart').value;
+    const end = document.getElementById('dateEnd').value;
+    if (!start || !end) return alert('请选择时间范围');
+    window.open(`${BACKEND_URL}/api/export?metrics=${currentMetric}&start=${start}:00&end=${end}:00`);
+}
+
+init();
+</script>
+</body>
+</html>

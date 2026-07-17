@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多指标对比</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+/* ===== 可调参数 ===== */
+:root {
+    --max-charts: 6;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0f1923; color:#e0e0e0; font-family:'Microsoft YaHei','PingFang SC',sans-serif; }
+.nav { display:flex; align-items:center; background:#152230; padding:0 24px; height:52px; border-bottom:1px solid #1e3040; }
+.nav .logo { font-size:18px; font-weight:bold; color:#4fc3f7; margin-right:40px; }
+.nav a { color:#8899aa; text-decoration:none; padding:0 20px; height:52px; line-height:52px; font-size:14px; transition:all .2s; }
+.nav a:hover, .nav a.active { color:#fff; background:rgba(255,255,255,0.05); border-bottom:2px solid #4fc3f7; }
+.layout { display:flex; height:calc(100vh - 52px); }
+/* 左侧栏 */
+.sidebar { width:220px; background:#152230; border-right:1px solid #1e3040; padding:16px 12px; overflow-y:auto; flex-shrink:0; }
+.sidebar h3 { font-size:13px; color:#667788; margin-bottom:10px; }
+.sidebar .hint { font-size:11px; color:#ef5350; margin-bottom:10px; display:none; }
+.sidebar .hint.show { display:block; }
+.sidebar .cat-group { margin-bottom:14px; }
+.sidebar .cat-label { font-size:12px; color:#4fc3f7; margin-bottom:4px; padding-left:2px; border-left:2px solid #4fc3f7; }
+.sidebar label { display:flex; align-items:center; padding:4px 8px; cursor:pointer; font-size:12px; border-radius:3px; color:#aaa; transition:all .15s; }
+.sidebar label:hover { background:rgba(255,255,255,0.04); color:#ccc; }
+.sidebar label.checked { color:#fff; }
+.sidebar label.disabled { color:#445; cursor:not-allowed; opacity:0.4; }
+.sidebar input[type="checkbox"] { margin-right:6px; accent-color:#4fc3f7; }
+/* 右侧主区 */
+.content { flex:1; padding:16px 20px; overflow-y:auto; }
+.controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.controls button { background:#1e3040; color:#ccc; border:1px solid #2a4055; padding:6px 14px; border-radius:4px; cursor:pointer; font-size:13px; transition:all .2s; }
+.controls button:hover, .controls button.active { background:#4fc3f7; color:#0f1923; border-color:#4fc3f7; }
+.controls input[type="datetime-local"] { background:#1e3040; color:#ccc; border:1px solid #2a4055; padding:6px 10px; border-radius:4px; font-size:13px; }
+.controls input[type="datetime-local"]::-webkit-calendar-picker-indicator { filter:invert(1); }
+/* 图表网格 */
+.chart-grid { display:grid; gap:12px; }
+.chart-grid.cols-1 { grid-template-columns:1fr; }
+.chart-grid.cols-2 { grid-template-columns:1fr 1fr; }
+.chart-grid.cols-3 { grid-template-columns:1fr 1fr 1fr; }
+.chart-card { background:#152230; border-radius:8px; padding:10px; }
+.chart-card .card-title { font-size:13px; color:#4fc3f7; margin-bottom:4px; text-align:center; }
+.chart-card .chart-inner { width:100%; }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+    <span class="logo">涂装车间监控系统</span>
+    <a href="index.html">仪表盘</a>
+    <a href="detail.html">单指标详情</a>
+    <a href="compare.html" class="active">多指标对比</a>
+</nav>
+
+<div class="layout">
+    <aside class="sidebar" id="sidebar">
+        <h3>选择指标</h3>
+        <div class="hint" id="limitHint">最多选择 6 个指标</div>
+    </aside>
+    <main class="content">
+        <div class="controls">
+            <span style="font-size:12px;color:#667788;">起止:</span>
+            <input type="datetime-local" id="dateStart" step="1">
+            <span style="font-size:12px;color:#667788;">~</span>
+            <input type="datetime-local" id="dateEnd" step="1">
+            <span style="font-size:12px;color:#667788;">粒度:</span>
+            <button class="gran-btn active" data-gran="hourly">每小时</button>
+            <button class="gran-btn" data-gran="daily">每天</button>
+            <button class="gran-btn" data-gran="3day">每3天</button>
+            <button class="gran-btn" data-gran="raw">原始</button>
+        </div>
+        <div class="chart-grid cols-2" id="chartGrid"></div>
+    </main>
+</div>
+
+<script>
+// ==================== 配置 ====================
+const BACKEND_URL = 'http://127.0.0.1:9002';
+const MAX_CHARTS = 6;
+const COLOR = '#4fc3f7';
+
+const CAT_NAMES = { production:'生产', equipment:'设备', quality:'技质', management:'管理组', safety:'安全' };
+
+let metricsMeta = [];
+let selectedMetrics = [];
+let currentGranularity = 'hourly';
+let charts = {};  // key -> { chart, container }
+
+// ==================== 初始化 ====================
+async function init() {
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24*60*60*1000);
+    document.getElementById('dateStart').value = formatLocal(yesterday);
+    document.getElementById('dateEnd').value = formatLocal(now);
+
+    await loadMetricsMeta();
+    renderSidebar();
+    renderCharts();
+    loadData();
+
+    document.querySelectorAll('.gran-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.gran-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentGranularity = btn.dataset.gran;
+            loadData();
+        });
+    });
+    document.getElementById('dateStart').addEventListener('change', loadData);
+    document.getElementById('dateEnd').addEventListener('change', loadData);
+}
+
+function formatLocal(d) {
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function loadMetricsMeta() {
+    try {
+        const resp = await fetch(`${BACKEND_URL}/api/metrics`);
+        metricsMeta = await resp.json();
+    } catch(e) { console.error(e); }
+}
+
+function getLabel(key) {
+    const m = metricsMeta.find(x => x.key === key);
+    return m ? `${m.label}${m.unit ? ' ('+m.unit+')' : ''}` : key;
+}
+
+function renderSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    // 清除旧的 category groups（保留 h3 和 hint）
+    sidebar.querySelectorAll('.cat-group').forEach(el => el.remove());
+
+    const grouped = {};
+    metricsMeta.forEach(m => {
+        if (m.key === 'quality_top10') return;
+        if (!grouped[m.category]) grouped[m.category] = [];
+        grouped[m.category].push(m);
+    });
+
+    let html = '';
+    for (const [cat, metrics] of Object.entries(grouped)) {
+        html += `<div class="cat-group"><div class="cat-label">${CAT_NAMES[cat]||cat}</div>`;
+        metrics.forEach(m => {
+            const checked = selectedMetrics.includes(m.key);
+            const disabled = !checked && selectedMetrics.length >= MAX_CHARTS;
+            html += `
+            <label class="${checked?'checked':''} ${disabled?'disabled':''}" data-key="${m.key}">
+                <input type="checkbox" ${checked?'checked':''} ${disabled?'disabled':''}
+                       onchange="toggleMetric('${m.key}', this.checked)">
+                ${m.label}
+            </label>`;
+        });
+        html += '</div>';
+    }
+
+    // 更新 hint 状态
+    const hint = document.getElementById('limitHint');
+    hint.className = 'hint' + (selectedMetrics.length >= MAX_CHARTS ? ' show' : '');
+    // 追加新的 groups
+    hint.insertAdjacentHTML('afterend', html);
+}
+
+function toggleMetric(key, checked) {
+    if (checked) {
+        if (selectedMetrics.length >= MAX_CHARTS) return;
+        selectedMetrics.push(key);
+    } else {
+        selectedMetrics = selectedMetrics.filter(k => k !== key);
+    }
+    renderSidebar();
+    renderCharts();
+    loadData();
+}
+
+function renderCharts() {
+    const grid = document.getElementById('chartGrid');
+    const n = selectedMetrics.length;
+
+    // 列数
+    if (n <= 1) grid.className = 'chart-grid cols-1';
+    else if (n <= 4) grid.className = 'chart-grid cols-2';
+    else grid.className = 'chart-grid cols-2';
+
+    // 清理旧图表
+    Object.values(charts).forEach(c => c.chart.dispose());
+    charts = {};
+
+    let html = '';
+    selectedMetrics.forEach(key => {
+        html += `
+        <div class="chart-card">
+            <div class="card-title">${getLabel(key)}</div>
+            <div class="chart-inner" id="chart-${key}"></div>
+        </div>`;
+    });
+    grid.innerHTML = html;
+
+    // 创建图表实例
+    selectedMetrics.forEach(key => {
+        const el = document.getElementById(`chart-${key}`);
+        if (!el) return;
+        const ch = echarts.init(el);
+        ch.setOption({
+            tooltip: { trigger:'axis' },
+            grid: { left:55, right:15, top:10, bottom:25 },
+            xAxis: { type:'time', axisLabel:{color:'#8899aa',fontSize:10}, splitLine:{show:false} },
+            yAxis: { type:'value', axisLabel:{color:'#8899aa',fontSize:10}, splitLine:{lineStyle:{color:'#1e3040'}} },
+            series: [{
+                type:'line', smooth:true, showSymbol:false,
+                lineStyle:{color:COLOR,width:1.5},
+                data:[]
+            }]
+        });
+        charts[key] = { chart: ch, container: el };
+    });
+
+    // 根据数量设置高度
+    const rowHeight = n <= 2 ? 420 : n <= 4 ? 320 : 240;
+    document.querySelectorAll('.chart-inner').forEach(el => { el.style.height = rowHeight + 'px'; });
+
+    // resize
+    setTimeout(() => { Object.values(charts).forEach(c => c.chart.resize()); }, 50);
+}
+
+window.addEventListener('resize', () => {
+    Object.values(charts).forEach(c => c.chart.resize());
+});
+
+async function loadData() {
+    if (selectedMetrics.length === 0) return;
+
+    const start = document.getElementById('dateStart').value;
+    const end = document.getElementById('dateEnd').value;
+    if (!start || !end) return;
+
+    // 全部走 multi-stats（raw 也一样走 stats?raw 对 multi 不适用，用 raw 单查）
+    if (currentGranularity === 'raw') {
+        // 逐个获取原始数据
+        const results = await Promise.all(
+            selectedMetrics.map(async key => {
+                try {
+                    const resp = await fetch(`${BACKEND_URL}/api/raw?metric=${key}&start=${start}:00&end=${end}:00&limit=5000`);
+                    const data = await resp.json();
+                    return { key, data };
+                } catch(e) { return { key, data: [] }; }
+            })
+        );
+        results.forEach(({ key, data }) => {
+            const c = charts[key];
+            if (!c) return;
+            c.chart.setOption({
+                series: [{
+                    data: data.map(d => [d.timestamp, d.value]),
+                    lineStyle:{color:COLOR,width:1.5}
+                }]
+            });
+        });
+    } else {
+        const metricsStr = selectedMetrics.join(',');
+        try {
+            const resp = await fetch(
+                `${BACKEND_URL}/api/multi-stats?metrics=${metricsStr}&start=${start}:00&end=${end}:00&granularity=${currentGranularity}`
+            );
+            const result = await resp.json();
+            for (const key of selectedMetrics) {
+                const c = charts[key];
+                if (!c) continue;
+                const points = result[key] || [];
+                c.chart.setOption({
+                    series: [{
+                        data: points.map(p => [p.period_start, p.avg]),
+                        lineStyle:{color:COLOR,width:1.5}
+                    }]
+                });
+            }
+        } catch(e) { console.error(e); }
+    }
+}
+
+init();
+</script>
+</body>
+</html>

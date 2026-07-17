@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>涂装车间 - 实时监控仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+/* ===== 可调参数 ===== */
+:root {
+    --refresh-interval: 10000;  /* 毫秒 */
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0f1923; color:#e0e0e0; font-family:'Microsoft YaHei','PingFang SC',sans-serif; min-height:100vh; }
+/* 顶部导航 */
+.nav { display:flex; align-items:center; background:#152230; padding:0 24px; height:52px; border-bottom:1px solid #1e3040; }
+.nav .logo { font-size:18px; font-weight:bold; color:#4fc3f7; margin-right:40px; }
+.nav a { color:#8899aa; text-decoration:none; padding:0 20px; height:52px; line-height:52px; font-size:14px; transition:all .2s; }
+.nav a:hover, .nav a.active { color:#fff; background:rgba(255,255,255,0.05); border-bottom:2px solid #4fc3f7; }
+.nav .status { margin-left:auto; font-size:12px; color:#66bb6a; }
+/* 主体 */
+.main { padding:20px 24px; }
+/* 分类标题 */
+.cat-title { font-size:14px; color:#4fc3f7; margin:16px 0 10px 0; padding-left:4px; border-left:3px solid #4fc3f7; }
+/* 卡片网格 */
+.grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:8px; }
+.card { background:#152230; border-radius:8px; padding:14px 16px; cursor:pointer; transition:all .2s; border:1px solid transparent; position:relative; overflow:hidden; }
+.card:hover { transform:translateY(-2px); box-shadow:0 4px 16px rgba(0,0,0,0.3); }
+.card::before { content:''; position:absolute; top:0; left:0; width:4px; height:100%; }
+.card.cat-production::before { background:#42a5f5; }  .card.cat-production:hover { border-color:#42a5f5; }
+.card.cat-equipment::before { background:#66bb6a; }  .card.cat-equipment:hover { border-color:#66bb6a; }
+.card.cat-quality::before   { background:#ffa726; }  .card.cat-quality:hover { border-color:#ffa726; }
+.card.cat-management::before { background:#ab47bc; }  .card.cat-management:hover { border-color:#ab47bc; }
+.card.cat-safety::before    { background:#ef5350; }  .card.cat-safety:hover { border-color:#ef5350; }
+.card .name { font-size:12px; color:#8899aa; margin-bottom:6px; }
+.card .value { font-size:28px; font-weight:bold; color:#fff; transition:color .3s; }
+.card .unit { font-size:12px; color:#667788; margin-left:4px; }
+.card .changed { animation:flash .5s ease; }
+@keyframes flash { 0%{color:#ffeb3b;} 100%{color:#fff;} }
+/* top10特殊卡片 */
+.card-top10 .value { font-size:14px; line-height:1.6; }
+/* 响应式 */
+@media (max-width:1100px) { .grid { grid-template-columns:repeat(3,1fr); } }
+@media (max-width:768px)  { .grid { grid-template-columns:repeat(2,1fr); } }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+    <span class="logo">涂装车间监控系统</span>
+    <a href="/" class="active">仪表盘</a>
+    <a href="detail.html">单指标详情</a>
+    <a href="compare.html">多指标对比</a>
+    <span class="status" id="status">● 连接中...</span>
+</nav>
+
+<div class="main" id="app"></div>
+
+<script>
+// ==================== 配置 ====================
+const BACKEND_URL = 'http://127.0.0.1:9002';
+const REFRESH_MS = 10000;  // 刷新间隔
+
+const CAT_NAMES = {
+    production: '生产', equipment: '设备', quality: '技质',
+    management: '管理组', safety: '安全'
+};
+
+let metricsMeta = [];
+let lastValues = {};
+
+// ==================== 初始化 ====================
+async function init() {
+    await loadMetricsMeta();
+    renderCards();
+    await refreshData();
+    setInterval(refreshData, REFRESH_MS);
+}
+
+async function loadMetricsMeta() {
+    try {
+        const resp = await fetch(`${BACKEND_URL}/api/metrics`);
+        metricsMeta = await resp.json();
+    } catch(e) {
+        console.error('加载指标元信息失败', e);
+    }
+}
+
+function renderCards() {
+    const app = document.getElementById('app');
+    const grouped = {};
+    metricsMeta.forEach(m => {
+        if (!grouped[m.category]) grouped[m.category] = [];
+        grouped[m.category].push(m);
+    });
+
+    let html = '';
+    for (const [cat, metrics] of Object.entries(grouped)) {
+        html += `<div class="cat-title">${CAT_NAMES[cat] || cat}</div>`;
+        html += '<div class="grid">';
+        metrics.forEach(m => {
+            const isTop10 = m.key === 'quality_top10';
+            html += `
+            <div class="card cat-${cat} ${isTop10 ? 'card-top10' : ''}"
+                 onclick="goDetail('${m.key}')"
+                 title="点击查看 ${m.label} 详情">
+                <div class="name">${m.label}</div>
+                <div class="value" id="val-${m.key}">--</div>
+                ${m.unit ? `<span class="unit">${m.unit}</span>` : ''}
+            </div>`;
+        });
+        html += '</div>';
+    }
+    app.innerHTML = html;
+}
+
+async function refreshData() {
+    try {
+        const resp = await fetch(`${BACKEND_URL}/api/latest`);
+        const data = await resp.json();
+        document.getElementById('status').innerHTML = '● 在线';
+        document.getElementById('status').style.color = '#66bb6a';
+        updateCards(data);
+    } catch(e) {
+        document.getElementById('status').innerHTML = '● 离线';
+        document.getElementById('status').style.color = '#ef5350';
+    }
+}
+
+function updateCards(data) {
+    for (const m of metricsMeta) {
+        const el = document.getElementById(`val-${m.key}`);
+        if (!el) continue;
+        let val = data[m.key];
+        if (m.key === 'quality_top10') {
+            // 显示 TOP1
+            if (Array.isArray(val) && val.length > 0) {
+                val = `TOP1: ${val[0].name}(${val[0].count}件)`;
+            } else if (typeof val === 'string') {
+                try { const arr = JSON.parse(val); val = arr.length > 0 ? `TOP1: ${arr[0].name}(${arr[0].count}件)` : '--'; }
+                catch(e) { val = '--'; }
+            } else { val = '--'; }
+        } else if (typeof val === 'number') {
+            val = parseFloat(val.toFixed(m.key === 'production_count' ? 1 : 2));
+        } else {
+            val = '--';
+        }
+
+        const strVal = String(val);
+        if (lastValues[m.key] !== undefined && lastValues[m.key] !== strVal) {
+            el.classList.remove('changed');
+            void el.offsetWidth;
+            el.classList.add('changed');
+        }
+        el.textContent = strVal;
+        lastValues[m.key] = strVal;
+    }
+}
+
+function goDetail(metricKey) {
+    window.location.href = `detail.html?metric=${metricKey}`;
+}
+
+init();
+</script>
+</body>
+</html>
